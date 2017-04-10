@@ -5,7 +5,7 @@ import FieldTraits: @field, @composed, Fields, default
 @field ImageData
 
 @field SpatialOrder begin
-    SpatialOrder = (1, 2)
+    SpatialOrder = (1, 2) # default value for SpatialOrder (xy)
 end
 @field Ranges
 
@@ -68,7 +68,7 @@ img2 = Image(ImageData => data, SpatialOrder => (2, 1))
 img3 = Image(ImageData => data, SpatialOrder => :yx)
 img4 = GrayImage(ImageData => data, SpatialOrder => :yx)
 
-default_trans = Transform()
+default_trans = Transform() # this should initialize with the defaults of the fields
 @test default_trans[Rotation] == Quaternion(1, 0, 0, 0)
 @test default_trans[Scale] == Vec3f0(1)
 @test default_trans[Position] == Point3f0(0)
