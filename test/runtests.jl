@@ -1,4 +1,4 @@
-using FieldTraits, Quaternions, GeometryTypes, Colors
+using FieldTraits, Quaternions, Colors
 using Base.Test
 import FieldTraits: @field, @composed, Fields, default
 
@@ -13,10 +13,10 @@ end
     Rotation = Quaternion(1, 0, 0, 0)
 end
 @field Scale begin
-    Scale = Vec3f0(1)
+    Scale = (1, 1, 1) # Should rather be Vec, but GeometryTypes doesn't work on 0.6 right now
 end
 @field Position begin
-    Position = Point3f0(0)
+    Position = (0, 0, 0) # should be Point
 end
 @composed type Transform
     Rotation
@@ -70,8 +70,8 @@ img4 = GrayImage(ImageData => data, SpatialOrder => :yx)
 
 default_trans = Transform()
 @test default_trans[Rotation] == Quaternion(1, 0, 0, 0)
-@test default_trans[Scale] == Vec3f0(1)
-@test default_trans[Position] == Point3f0(0)
+@test default_trans[Scale] == (1, 1, 1)
+@test default_trans[Position] == (0, 0, 0)
 
 @testset "From data constructor" begin
     @test img1[ImageData] == data
