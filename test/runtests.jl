@@ -79,6 +79,9 @@ end
 
 
 data = rand(RGB, 17, 42)
+# Set up like this, we get conversion behaviour and partial construction with default generation for free :)
+# It's probably not fully optimized yet, but these kind of constructor should be fast to execute and most calculation should
+# be completely statically inferable and might land on the stack! :)
 img1 = Image(ImageData => data)
 img2 = Image(ImageData => data, SpatialOrder => (2, 1))
 img3 = Image(ImageData => data, SpatialOrder => :yx)
