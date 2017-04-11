@@ -26,8 +26,8 @@ end
 
 # Cool: we can document a field once and for all types which use that field!! :)
 """
-Ranges indicate, on what an otherwise visualization should be mapped.
-E.g. use Ranges to indicate, an image should be mapped to a certain range.
+Ranges indicate, on what an otherwise dimensionless visualization should be mapped.
+E.g. use Ranges to indicate that an image should be mapped to a certain range.
 """
 Ranges
 
