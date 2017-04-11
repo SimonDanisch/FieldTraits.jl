@@ -2,8 +2,10 @@ __precompile__(true)
 module FieldTraits
 
 using Compat
+using Compat.TypeUtils
+
 import Base: @propagate_inbounds, @pure, tail, haskey, getindex, setindex!, get
-import Base: is_linenumber, convert, (==)
+import Base: is_linenumber, convert, (==), get!
 
 @compat abstract type Composable end
 

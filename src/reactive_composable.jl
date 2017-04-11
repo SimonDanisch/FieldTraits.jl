@@ -33,10 +33,10 @@ function link!{F <: Field}(::Type{F}, pair::Pair{ReactiveComposable, Composable}
         b[F] = val
     end
 end
-function on(F, field::Field, object::ReactiveComposable, args...)
+function on{F <: Field}(Func, ::Type{F}, object::ReactiveComposable, args...)
     links = object[Links]
-    if haskey(links, field)
-        # adds a callback to the field
-        push!(links[field], (F, args))
-    end
+    fieldlinks = get!(links, F, [])
+    # adds a callback to the field
+    push!(fieldlinks, (Func, args))
+    return
 end

@@ -1,6 +1,6 @@
 using FieldTraits, Quaternions, Colors
 using Base.Test
-import FieldTraits: @field, @composed, Fields, default
+import FieldTraits: @field, @composed, @reactivecomposed, Fields, default
 
 @field ImageData
 
@@ -51,6 +51,8 @@ end
 
 # Just for the lulz, lets create almost the same type, with slightly different convert behaviour
 # TODO extend composed macro, to actually inherit from Image, without repeating Images fields
+# This could e.g. be used to represent the same visual for different backends,
+# which need slightly different conversion behaviour
 @composed type GrayImage
     ImageData
     Ranges
@@ -100,4 +102,27 @@ end
     @test img4[Ranges] == (0:size(data, 2), 0:size(data, 1))
     @test img4[Transform] == Transform()
     @test img4[SpatialOrder] == (2, 1)
+end
+
+
+@field Mouse begin
+    Mouse = (0, 0)
+end
+@field Area begin
+    Area = (0, 0, 0, 0)
+end
+
+@reactivecomposed type Window
+    Mouse
+    Area
+end
+@testset "Reactive Composed" begin
+    x = Window()
+    testval = (77, 77)
+    FieldTraits.on(Mouse, x) do mouse
+        testval = mouse
+        return
+    end
+    x[Mouse] = (22, 2)
+    @test testval == (22, 2)
 end

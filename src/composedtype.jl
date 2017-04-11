@@ -204,18 +204,22 @@ function composed_type(expr, additionalfields = [], supertype = Composable)
     idx = 1
     composedfields = [additionalfields; expr.args[3].args]
     typedfields = map(composedfields) do field
-        sym, T = if isa(field, Symbol)
+        sym, Field, T = if isa(field, Symbol)
             push!(T_args, field)
-            field, field
+            field, eval(current_module(), field), field
         elseif isa(field, Expr) && field.head == :(::)
-            field.args
+            sym, T = field.args
+            sym, eval(current_module(), sym), T
+        elseif isa(field, DataType)
+            sym = typename(field).name
+            push!(T_args, sym)
+            sym, field, sym
         elseif is_linenumber(field)
             return field
         else
             error("Unsupported expr: $field")
         end
         fname = Symbol(lowercase(string(sym)))
-        Field = eval(current_module(), sym)
         push!(fields, Field)
         # Recursively add fieldinex methods
         add_fieldindex(Field, idxfuncs, :((Val{$idx}(),)), name)
@@ -228,7 +232,7 @@ function composed_type(expr, additionalfields = [], supertype = Composable)
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
         FieldTraits.Fields(::$name) = ($(fields...),)
     end
-    typename, supertype = if isa(name, Symbol)
+    tname, supertype = if isa(name, Symbol)
         name, supertype
     elseif isa(name, Expr) && name.head == :(<:)
         name.args
@@ -236,7 +240,7 @@ function composed_type(expr, additionalfields = [], supertype = Composable)
         error("Unsupported expr $name")
     end
     expr = quote
-        type $(typename){$(T_args...)} <: $supertype
+        type $(tname){$(T_args...)} <: $supertype
             $(typedfields...)
         end
         $(esc(fieldfuncs))
@@ -251,24 +255,29 @@ macro composed(expr)
     composed_type(expr)
 end
 
-# A dictionary wrapper supporting the CmposedApi
-immutable ComposedDict{K, V} <: Composable
+# A dictionary wrapper supporting the ComposedApi
+immutable ComposedDict{V} <: Composable
     data::Dict{Symbol, V}
 end
 
-haskey(cd::ComposedDict, k) = haskey(cd.data, k)
+haskey{F <: Field}(cd::ComposedDict, ::Type{F}) = haskey(cd.data, typename(F).name)
 
-function getindex(cd::ComposedDict, k)
+function getindex{F <: Field}(cd::ComposedDict, ::Type{F})
     # TODO search!
-    getindex(cd.data, Symbol(k))
+    getindex(cd.data, typename(F).name)
 end
 
-function setindex!(cd::ComposedDict, val, k)
+function setindex!{F <: Field}(cd::ComposedDict, val, ::Type{F})
     # TODO search!
-    setindex!(cd.data,val, Symbol(k))
+    setindex!(cd.data,val, typename(F).name)
+end
+function get!{F <: Field}(cd::ComposedDict, ::Type{F}, default)
+    get!(cd.data, typename(F).name, default)
 end
 
-
+Fields(::Type{ComposedDict}) = ()
+Fields(::ComposedDict) = ()
+(::Type{ComposedDict})() = ComposedDict(Dict{Symbol, Any}())
 
 # helper to use tuples as partial Composed Traits
 function Base.getindex{F <: Field}(x::Tuple{}, ::Type{F})
