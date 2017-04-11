@@ -63,7 +63,7 @@ function default(x, ::Type{Ranges})
     (0:size(data, s[1]), 0:size(data, s[2]))
 end
 
-# Just for the lulz, lets create almost the same type, with slightly different convert behaviour
+# Just for an example, lets create almost the same type, with slightly different convert behaviour
 # TODO extend composed macro, to actually inherit from Image, without repeating Images fields
 # This could e.g. be used to represent the same visual for different backends,
 # which need slightly different conversion behaviour
