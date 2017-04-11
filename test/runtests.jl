@@ -24,6 +24,20 @@ end
     Position
 end
 
+# Cool: we can document a field once and for all types which use that field!! :)
+"""
+Ranges indicate, on what an otherwise visualization should be mapped.
+E.g. use Ranges to indicate, an image should be mapped to a certain range.
+"""
+Ranges
+
+"""
+Transforms a visual. You can set the scale, position and rotation.
+You can do this directly via e.g. transform[Scale] = (1, 1, 1), or better, call:
+scale!(trasnform, (1,1,1)). The latter is guaranteed to work, even if Transform
+is implemented differently (e.g. it's just a matrix).
+"""
+Transform
 
 @composed type Image
     ImageData
