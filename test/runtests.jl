@@ -4,20 +4,12 @@ import FieldTraits: @field, @composed, @reactivecomposed, Fields, default
 
 @field ImageData
 
-@field SpatialOrder begin
-    SpatialOrder = (1, 2) # default value for SpatialOrder (xy)
-end
+@field SpatialOrder = (1, 2) # default value for SpatialOrder (xy)
 @field Ranges
+@field Rotation = Quaternion(1, 0, 0, 0)
+@field Scale = (1, 1, 1) # Should rather be Vec, but GeometryTypes doesn't work on 0.6 right now
+@field Position = (0, 0, 0) # should be Point
 
-@field Rotation begin
-    Rotation = Quaternion(1, 0, 0, 0)
-end
-@field Scale begin
-    Scale = (1, 1, 1) # Should rather be Vec, but GeometryTypes doesn't work on 0.6 right now
-end
-@field Position begin
-    Position = (0, 0, 0) # should be Point
-end
 @composed type Transform
     Rotation
     Scale
@@ -62,21 +54,15 @@ function default(x, ::Type{Ranges})
     s = get(x, SpatialOrder) # if SpatialOrder in x, gets that, if not gets default(x, SpatialOrder)
     (0:size(data, s[1]), 0:size(data, s[2]))
 end
-
+isa(Transform, UnionAll)
+Transform <: UnionAll
 # Just for an example, lets create almost the same type, with slightly different convert behaviour
-# TODO extend composed macro, to actually inherit from Image, without repeating Images fields
-# This could e.g. be used to represent the same visual for different backends,
-# which need slightly different conversion behaviour
 @composed type GrayImage
-    ImageData
-    Ranges
-    Transform
-    SpatialOrder::NTuple{2, Int}
+    <: Image # Inherit fields from Image
 end
 function Base.convert(::Type{ImageData}, ::Type{GrayImage}, img)
     Gray.(img)
 end
-
 
 data = rand(RGB, 17, 42)
 # Set up like this, we get conversion behaviour and partial construction with default generation for free :)

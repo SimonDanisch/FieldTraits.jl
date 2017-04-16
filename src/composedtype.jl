@@ -1,9 +1,66 @@
 const Field = Composable
 
 """
+Throws an error for the usage of some type/function.
+Defaults to throwing the docstring as a message
+"""
+immutable UsageError <: Exception
+    message::String
+    value
+end
+function UsageError(c, value)
+    message = stringmime("text/plain", Docs.doc(c))
+    UsageError(message, value)
+end
+
+function Base.showerror(io::IO, e::UsageError)
+    println(io, "Usage Error:")
+    for line in split(e.message, r"\r?\n")
+        println(io, "   ", line)
+    end
+    print(io, "Supplied value: ", e.value)
+end
+
+"""
 Gets a tuple of all field types of a composable
 """
 function Fields end
+
+
+"""
+Can be used to assert that a composable has certain fields.
+Usage: `@needs composable: Field1, Field2, ...`
+"""
+macro needs(expr::Expr)
+    comp_fields = @match expr begin
+        (composable_:f1_, ftail__)  => (composable, Any[f1, ftail...,])
+        (composable_:var1_ = field1_)  => (composable, Any[:($var1 = $field1),])
+        (composable_:var1_ = field1_, ftail__)  => (composable, Any[:($var1 = $field1), ftail...,])
+    end
+    if comp_fields == nothing
+        throw(UsageError("Usage: `@needs composable: Field1, name = Field2, ...`", expr))
+    end
+    composable, fields = comp_fields
+    checks = Expr(:block)
+    checks.args = map(fields) do field
+        field_expr = @match field begin
+            (var_ = field_) => begin
+                quote
+                    haskey($composable, $field) || error("$($composable) doesn't contain field $($field)")
+                    $var = $composable[$field]
+                end
+            end
+            field_ => begin
+                :(haskey($((composable)), $((field))) || error("$($composable) doesn't contain field $($field)"))
+            end
+        end
+        if field_expr == nothing
+            throw(UsageError("Usage: `@needs composable: Field1, name = Field2, ...`", expr))
+        end
+        field_expr
+    end
+    esc(checks)
+end
 
 """
 default([Parent], field) constructs a default for `field`.
@@ -166,6 +223,39 @@ macro field(name::Symbol, defaults)
     end)
 end
 
+macro field(expr::Expr)
+    usage = """
+        "Must be @field Sym [<: OptionalSuperType] = default_body.
+        Found: $expr
+    """
+    if !(expr.head == :(=) || expr.head == :(<:))
+        error(usage)
+    end
+    name, supertype, default = if expr.head == :(<:)
+        expr.args..., :()
+    else
+        name, default = expr.args
+        name, supertype = if isa(name, Expr)
+            if name.head != :(<:)
+                error(usage)
+            end
+            name.args
+        else
+            name, FieldTraits.Field
+        end
+
+        name,
+        supertype,
+        :(FieldTraits.default{T <: $name}(::Type{T}) = $(default))
+    end
+    expr = quote
+        immutable $name <: $supertype end
+        FieldTraits.Fields(::Type{$name}) = ()
+        FieldTraits.default{T <: $name}(::Type{T}) = $default
+    end
+    esc(expr)
+end
+
 """
 Recursively adds fieldindex methods for composed types.
 E.g.:
@@ -181,52 +271,73 @@ end
 Will result in Test having fieldindex methods also for Scale Rotation and position
 ```
 """
-function add_fieldindex(Field, block, idx, name)
+function add_fieldindex!(Field, block, idx, name)
     push!(block.args,
         :(FieldTraits.fieldindex{T <: $name}(::Type{T}, ::Type{$Field}) = $idx)
     )
     if Field <: Composable
         for (i, T) in enumerate(Fields(Field))
             newidx = Expr(:tuple, idx.args..., :(Val{$i}()))
-            add_fieldindex(T, block, newidx, name)
+            add_fieldindex!(T, block, newidx, name)
         end
     end
 end
 
-
-function composed_type(expr, additionalfields = [], supertype = Composable)
-    @assert expr.head == :type
-    name = expr.args[2]
-    idxfuncs = Expr(:block)
-    parameters = []
-    fields = []
-    T_args = []
-    idx = 1
-    composedfields = [additionalfields; expr.args[3].args]
-    typedfields = map(composedfields) do field
-        sym, Field, T = if isa(field, Symbol)
-            push!(T_args, field)
-            field, eval(current_module(), field), field
-        elseif isa(field, Expr) && field.head == :(::)
-            sym, T = field.args
-            sym, eval(current_module(), sym), T
-        elseif isa(field, DataType)
+function add_fields!(composedfields, result, fields, T_args, idx = 1)
+    for field in composedfields
+        sym, Field, T = field, field, field
+        if is_linenumber(field)
+            push!(result, field)
+            continue
+        # untyped field which will get a parameter
+        elseif isa(field, Symbol) || isa(field, GlobalRef) ||
+                (isa(field, Expr) && field.head == :(.))
+            Field = eval(current_module(), field)
+            sym = typename(Field).name
+            T = sym
+            push!(T_args, sym)
+        elseif isa(field, Expr) # typed field with no parameter
+            if field.head == :(::)
+                sym, T = field.args
+                Field = eval(current_module(), sym)
+            elseif field.head == :(.) || isa(field, GlobalRef) # untyped field which will get a parameter
+                push!(T_args, field)
+                Field = eval(current_module(), field)
+            elseif field.head == :(<:) # inherit fields
+                if length(field.args) != 1
+                    error("inheritance expression must be of form `<: Composable`")
+                end
+                tsym = field.args[1]
+                T = eval(current_module(), tsym)
+                idx = add_fields!(Fields(T), result, fields, T_args, idx)
+                continue
+            else
+                error("Must be field::T, or <: T. Found: $field")
+            end
+        elseif isa(field, DataType) || (isdefined(Base, :UnionAll) && isa(field, UnionAll))
             sym = typename(field).name
             push!(T_args, sym)
-            sym, field, sym
-        elseif is_linenumber(field)
-            return field
+            T = sym
         else
-            error("Unsupported expr: $field")
+            error("Unsupported expr: $field $(typeof(field))")
         end
         fname = Symbol(lowercase(string(sym)))
         push!(fields, Field)
-        # Recursively add fieldinex methods
-        add_fieldindex(Field, idxfuncs, :((Val{$idx}(),)), name)
-
+        push!(result, :($fname::$T))
         idx += 1
+    end
+    idx
+end
 
-        :($fname::$T)
+function composed_type(expr::Expr, additionalfields = [], supertype = Composable)
+    @assert expr.head == :type
+    name = expr.args[2]
+    composedfields = [additionalfields; expr.args[3].args]
+    typedfields = []; fields = []; T_args = []
+    add_fields!(composedfields, typedfields, fields, T_args)
+    idxfuncs = Expr(:block)
+    for (i, Field) in enumerate(fields)
+        add_fieldindex!(Field, idxfuncs, :((Val{$i}(),)), name)
     end
     fieldfuncs = quote
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
@@ -249,9 +360,17 @@ function composed_type(expr, additionalfields = [], supertype = Composable)
     expr
 
 end
+
 """
+Usage:
+```Julia
+@composed type Name
+    FieldTrait1
+    FieldTrait2::OptionalStrictType
+end
+```
 """
-macro composed(expr)
+macro composed(expr::Expr)
     composed_type(expr)
 end
 

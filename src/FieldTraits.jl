@@ -1,7 +1,7 @@
 __precompile__(true)
 module FieldTraits
 
-using Compat
+using Compat, MacroTools
 using Compat.TypeUtils
 
 import Base: @propagate_inbounds, @pure, tail, haskey, getindex, setindex!, get

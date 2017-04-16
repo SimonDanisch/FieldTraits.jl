@@ -1,6 +1,4 @@
-@field Links begin
-    Links = ComposedDict()
-end
+@field Links = FieldTraits.ComposedDict()
 
 """
 Composable, that allows one to link fields and register callbacks to field changes
@@ -8,17 +6,18 @@ Composable, that allows one to link fields and register callbacks to field chang
 macro reactivecomposed(expr)
     composed_type(expr, [Links], ReactiveComposable)
 end
-
 @propagate_inbounds function setindex!{F <: Field}(ct::ReactiveComposable, value, field::Type{F})
+    _setindex!(ct, value, field)
     links = ct[Links]
     if haskey(links, field)
         link = links[field]
-        for (func, args) in link
-            func(value, args...)
+        for (func, fields, args) in link
+            func(map(f-> ct[f], fields)..., args...)
         end
     end
-    _setindex!(ct, value, field)
+    value
 end
+
 
 
 """
@@ -33,10 +32,27 @@ function link!{F <: Field}(::Type{F}, pair::Pair{ReactiveComposable, Composable}
         b[F] = val
     end
 end
-function on{F <: Field}(Func, ::Type{F}, object::ReactiveComposable, args...)
+
+
+function on(F, object::ReactiveComposable, head, tail...)
     links = object[Links]
-    fieldlinks = get!(links, F, [])
-    # adds a callback to the field
-    push!(fieldlinks, (Func, args))
-    return
+    args = (head, tail...)
+    _fields = []; _args = []
+    field, state = first(args), start(args)
+    nomorefields = false
+    for elem in args
+        if elem <: Field && !nomorefields
+            push!(_fields, elem)
+        else
+            nomorefields = true
+            push!(_args, elem)
+        end
+    end
+    args = (_args...,)
+    fields = (_fields...,)
+    for field in fields
+        fieldlinks = get!(links, field, [])
+        # adds a callback to the field
+        push!(fieldlinks, (F, fields, args))
+    end
 end
