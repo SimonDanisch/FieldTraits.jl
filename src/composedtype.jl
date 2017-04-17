@@ -26,6 +26,19 @@ Gets a tuple of all field types of a composable
 """
 function Fields end
 
+function field2string(field)
+    tname = typename(field)
+    mod = tname.module
+    fname = tname.name
+    mname = module_name(mod)
+    # this is kinda terrible.. But we need nice names, and uniqueness of keyes.
+    mname_str = mod == Main || module_parent(mod) == Main ? "" : string(mname, "_")
+    string(mname_str, fname)
+end
+function field2symbol(field)
+    name_str = field2string(field)
+    Symbol(lowercase(name_str))
+end
 
 """
 Can be used to assert that a composable has certain fields.
@@ -179,13 +192,6 @@ function (::Type{T}){T <: Composable}(c::Composable)
     T(fields...)
 end
 
-# Decouple implementation of field from declaration by using a macro
-macro field(name::Symbol)
-    esc(quote
-        immutable $name <: FieldTraits.Field end
-        FieldTraits.Fields(::Type{$name}) = ()
-    end)
-end
 
 function default_construction(main, defaults)
     usage = """Please supply defaults in block syntax. E.g:
@@ -214,6 +220,7 @@ function default_construction(main, defaults)
     end
     default_constructors
 end
+
 macro field(name::Symbol, defaults)
     constructors = default_construction(name, defaults)
     esc(quote
@@ -223,37 +230,31 @@ macro field(name::Symbol, defaults)
     end)
 end
 
-macro field(expr::Expr)
+macro field(expr)
     usage = """
         "Must be @field Sym [<: OptionalSuperType] = default_body.
         Found: $expr
     """
-    if !(expr.head == :(=) || expr.head == :(<:))
+    name_supertyp_default = @match expr begin
+        (name_ <: supertyp_ = default_) => name, supertyp, default
+        (name_ <: supertyp_) => name, supertyp, nothing
+        (name_ = default_) => name, FieldTraits.Field, default
+        (name_) => name, FieldTraits.Field, nothing
+    end
+    if name_supertyp_default == nothing
         error(usage)
     end
-    name, supertype, default = if expr.head == :(<:)
-        expr.args..., :()
+    name, supertyp, default = map(esc, name_supertyp_default)
+    default_expr = if default != nothing
+        :(FieldTraits.default{T <: $name}(::Type{T}) = $default)
     else
-        name, default = expr.args
-        name, supertype = if isa(name, Expr)
-            if name.head != :(<:)
-                error(usage)
-            end
-            name.args
-        else
-            name, FieldTraits.Field
-        end
-
-        name,
-        supertype,
-        :(FieldTraits.default{T <: $name}(::Type{T}) = $(default))
+        :()
     end
-    expr = quote
-        immutable $name <: $supertype end
+    quote
+        immutable $name <: $supertyp end
         FieldTraits.Fields(::Type{$name}) = ()
-        FieldTraits.default{T <: $name}(::Type{T}) = $default
+        $default_expr
     end
-    esc(expr)
 end
 
 """
@@ -293,7 +294,7 @@ function add_fields!(composedfields, result, fields, T_args, idx = 1)
         elseif isa(field, Symbol) || isa(field, GlobalRef) ||
                 (isa(field, Expr) && field.head == :(.))
             Field = eval(current_module(), field)
-            sym = typename(Field).name
+            sym = Symbol(field2string(Field))
             T = sym
             push!(T_args, sym)
         elseif isa(field, Expr) # typed field with no parameter
@@ -315,13 +316,13 @@ function add_fields!(composedfields, result, fields, T_args, idx = 1)
                 error("Must be field::T, or <: T. Found: $field")
             end
         elseif isa(field, DataType) || (isdefined(Base, :UnionAll) && isa(field, UnionAll))
-            sym = typename(field).name
+            sym = Symbol(field2string(field))
             push!(T_args, sym)
             T = sym
         else
             error("Unsupported expr: $field $(typeof(field))")
         end
-        fname = Symbol(lowercase(string(sym)))
+        fname = field2symbol(Field)
         push!(fields, Field)
         push!(result, :($fname::$T))
         idx += 1
@@ -329,10 +330,28 @@ function add_fields!(composedfields, result, fields, T_args, idx = 1)
     idx
 end
 
-function composed_type(expr::Expr, additionalfields = [], supertype = Composable)
-    @assert expr.head == :type
-    name = expr.args[2]
-    composedfields = [additionalfields; expr.args[3].args]
+function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
+    name_supertyp_fields = @match expr begin
+        type name_ <: supertyp_
+            fields__
+        end => (name, supertyp, fields)
+        type name_
+            fields__
+        end => (name, supertyp, fields)
+    end
+    if name_supertyp_fields == nothing
+        throw(UsageError("""
+        Usage:
+        ```Julia
+        @composed type Name [<: OptionalSuperType]
+            FieldTrait1
+            FieldTrait2::OptionalStrictType
+        end
+        ```
+        """, expr))
+    end
+    name, supertyp, fields = name_supertyp_fields
+    composedfields = [additionalfields; fields...]
     typedfields = []; fields = []; T_args = []
     add_fields!(composedfields, typedfields, fields, T_args)
     idxfuncs = Expr(:block)
@@ -343,28 +362,19 @@ function composed_type(expr::Expr, additionalfields = [], supertype = Composable
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
         FieldTraits.Fields(::$name) = ($(fields...),)
     end
-    tname, supertype = if isa(name, Symbol)
-        name, supertype
-    elseif isa(name, Expr) && name.head == :(<:)
-        name.args
-    else
-        error("Unsupported expr $name")
-    end
-    expr = quote
-        type $(tname){$(T_args...)} <: $supertype
+    quote
+        type $(name){$(T_args...)} <: $supertyp
             $(typedfields...)
         end
         $(esc(fieldfuncs))
         $(esc(idxfuncs))
     end
-    expr
-
 end
 
 """
 Usage:
 ```Julia
-@composed type Name
+@composed type Name [<: OptionalSuperType]
     FieldTrait1
     FieldTrait2::OptionalStrictType
 end
@@ -376,27 +386,27 @@ end
 
 # A dictionary wrapper supporting the ComposedApi
 immutable ComposedDict{V} <: Composable
-    data::Dict{Symbol, V}
+    data::Dict{DataType, V}
 end
 
-haskey{F <: Field}(cd::ComposedDict, ::Type{F}) = haskey(cd.data, typename(F).name)
+haskey{F <: Field}(cd::ComposedDict, ::Type{F}) = haskey(cd.data, F)
 
 function getindex{F <: Field}(cd::ComposedDict, ::Type{F})
     # TODO search!
-    getindex(cd.data, typename(F).name)
+    getindex(cd.data, F)
 end
 
 function setindex!{F <: Field}(cd::ComposedDict, val, ::Type{F})
     # TODO search!
-    setindex!(cd.data,val, typename(F).name)
+    setindex!(cd.data,val, F)
 end
 function get!{F <: Field}(cd::ComposedDict, ::Type{F}, default)
-    get!(cd.data, typename(F).name, default)
+    get!(cd.data, F, default)
 end
 
 Fields(::Type{ComposedDict}) = ()
 Fields(::ComposedDict) = ()
-(::Type{ComposedDict})() = ComposedDict(Dict{Symbol, Any}())
+(::Type{ComposedDict})() = ComposedDict(Dict{DataType, Any}())
 
 # helper to use tuples as partial Composed Traits
 function Base.getindex{F <: Field}(x::Tuple{}, ::Type{F})

@@ -6,6 +6,13 @@ Composable, that allows one to link fields and register callbacks to field chang
 macro reactivecomposed(expr)
     composed_type(expr, [Links], ReactiveComposable)
 end
+
+immutable _NoUpdate end
+const NoUpdate = _NoUpdate()
+
+@propagate_inbounds function setindex!{F <: Field}(ct::ReactiveComposable, value, field::Type{F}, ::_NoUpdate)
+    _setindex!(ct, value, field)
+end
 @propagate_inbounds function setindex!{F <: Field}(ct::ReactiveComposable, value, field::Type{F})
     _setindex!(ct, value, field)
     links = ct[Links]
@@ -41,7 +48,7 @@ function on(F, object::ReactiveComposable, head, tail...)
     field, state = first(args), start(args)
     nomorefields = false
     for elem in args
-        if elem <: Field && !nomorefields
+        if !nomorefields && isa(elem, Type) && elem <: Field
             push!(_fields, elem)
         else
             nomorefields = true
