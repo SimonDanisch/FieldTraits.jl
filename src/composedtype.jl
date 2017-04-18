@@ -120,18 +120,19 @@ end
 """
 Returns the type of a field in a composed type.
 Would like to extend Base.fieldtype, but that is an Builtin function which can't
-be extended
+be extended. Falls back to any and will get extended by the `@composed` macro
 """
-function cfieldtype(ct::Composable, field)
-    typeof(getindex(ct, field))
-end
+cfieldtype{T <: Composable}(::T, field) = cfieldtype(T, field)
+cfieldtype{T <: Composable}(ct::Type{T}, field) = Any
 
 """
 Converts a value to the field type of field in a composed type.
 """
-function fieldconvert(ct::Composable, field, value)
-    convert(cfieldtype(ct, field), value)
+function fieldconvert{T <: Composable}(ct::T, field, value)
+    convert(cfieldtype(T, field), value)
 end
+
+
 @propagate_inbounds function _setindex!{N}(ct::Composable, val, field::Val{N})
     setfield!(ct, N, fieldconvert(ct, field, val))
 end
@@ -170,6 +171,7 @@ function (::Type{T}){T <: Composable}()
     end
     T(map(field-> default(T, field), fields)...)
 end
+const ComposableLike = Union{Composable, Tuple{Vararg{Pair}}}
 
 # Constructor from partial composed type (tuple of pairs)
 (::Type{T}){T <: Composable, N}(c::Vararg{Pair, N}) = T(c)
@@ -179,55 +181,23 @@ function (::Type{T}){T <: Composable, N}(c::Tuple{Vararg{Pair, N}})
         field => convert(field, T, val) # converts might be expensive or a noop, so lets do it first
     end
     fields = map(Fields(T)) do field
-        get(c_converted, field)
+        convert(T, field, c_converted)
     end
     T(fields...)
 end
 
+"""
+Converts `x` to the field `F` in `C`. Defaults to getfield!
+"""
+function convert{C <: Composable, F <: Field}(::Type{C}, ::Type{F}, x::ComposableLike)
+    convert(cfieldtype(C, F), get(x, F))
+end
 # Constructor from another Composable type
 function (::Type{T}){T <: Composable}(c::Composable)
     fields = map(Fields(T)) do Field
-        convert(field, T, get(c, field))
+        convert(T, field, c)
     end
     T(fields...)
-end
-
-
-function default_construction(main, defaults)
-    usage = """Please supply defaults in block syntax. E.g:
-    @field Name begin
-        Name = :MyName
-    end"""
-    if defaults.head != :block
-        error(usage)
-    end
-    default_constructors = Expr(:block)
-    for elem in defaults.args
-        if Base.is_linenumber(elem)
-            push!(default_constructors.args, elem)
-            continue
-        elseif !isa(elem, Expr) && elem.head != :(=)
-            error(usage)
-        end
-        field, default_body = elem.args
-        if !isa(field, Symbol)
-            error(usage)
-        end
-        constr_expr = quote
-            FieldTraits.default{T <: $field}(::Type{T}) = $default_body
-        end
-        push!(default_constructors.args, constr_expr)
-    end
-    default_constructors
-end
-
-macro field(name::Symbol, defaults)
-    constructors = default_construction(name, defaults)
-    esc(quote
-        immutable $name <: FieldTraits.Field end
-        FieldTraits.Fields(::Type{$name}) = ()
-        $constructors
-    end)
 end
 
 macro field(expr)
@@ -284,11 +254,11 @@ function add_fieldindex!(Field, block, idx, name)
     end
 end
 
-function add_fields!(composedfields, result, fields, T_args, idx = 1)
+function add_fields!(composedfields, result, fields, T_args, ftype_funcs, idx = 1)
     for field in composedfields
         sym, Field, T = field, field, field
         if is_linenumber(field)
-            push!(result, field)
+            #push!(result, field)
             continue
         # untyped field which will get a parameter
         elseif isa(field, Symbol) || isa(field, GlobalRef) ||
@@ -296,13 +266,14 @@ function add_fields!(composedfields, result, fields, T_args, idx = 1)
             Field = eval(current_module(), field)
             sym = Symbol(field2string(Field))
             T = sym
-            push!(T_args, sym)
+            push!(T_args, Field => T)
         elseif isa(field, Expr) # typed field with no parameter
             if field.head == :(::)
                 sym, T = field.args
                 Field = eval(current_module(), sym)
+                push!(ftype_funcs, Field => T)
             elseif field.head == :(.) || isa(field, GlobalRef) # untyped field which will get a parameter
-                push!(T_args, field)
+                push!(T_args, field => field)
                 Field = eval(current_module(), field)
             elseif field.head == :(<:) # inherit fields
                 if length(field.args) != 1
@@ -317,14 +288,15 @@ function add_fields!(composedfields, result, fields, T_args, idx = 1)
             end
         elseif isa(field, DataType) || (isdefined(Base, :UnionAll) && isa(field, UnionAll))
             sym = Symbol(field2string(field))
-            push!(T_args, sym)
-            T = sym
+            T = sym; Field = field
+            push!(T_args, field => T)
         else
             error("Unsupported expr: $field $(typeof(field))")
         end
         fname = field2symbol(Field)
         push!(fields, Field)
         push!(result, :($fname::$T))
+
         idx += 1
     end
     idx
@@ -352,23 +324,39 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
     end
     name, supertyp, fields = name_supertyp_fields
     composedfields = [additionalfields; fields...]
-    typedfields = []; fields = []; T_args = []
-    add_fields!(composedfields, typedfields, fields, T_args)
+    typedfields = []; fields = []; FT_args = []; ftype_funcs = []
+    add_fields!(composedfields, typedfields, fields, FT_args, ftype_funcs)
     idxfuncs = Expr(:block)
+
     for (i, Field) in enumerate(fields)
         add_fieldindex!(Field, idxfuncs, :((Val{$i}(),)), name)
+    end
+    T_args = last.(FT_args)
+    fieldtype_expr = Expr(:block)
+    for (field, T) in FT_args
+        push!(fieldtype_expr.args,
+            :(FieldTraits.cfieldtype{$(T_args...)}(::Type{$name{$(T_args...)}}, ::Type{$field}) = $T)
+        )
+    end
+    for (field, T) in ftype_funcs
+        push!(fieldtype_expr.args,
+            :(FieldTraits.cfieldtype{C <: $name}(::Type{C}, ::Type{$field}) = $T)
+        )
     end
     fieldfuncs = quote
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
         FieldTraits.Fields(::$name) = ($(fields...),)
     end
-    quote
+    expr = quote
         type $(name){$(T_args...)} <: $supertyp
             $(typedfields...)
         end
-        $(esc(fieldfuncs))
-        $(esc(idxfuncs))
+        $(fieldfuncs)
+        $(idxfuncs)
+        $(fieldtype_expr)
     end
+    println(expr)
+    esc(expr)
 end
 
 """
@@ -434,14 +422,27 @@ function get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
 end
 
 
-_get{F <: Field}(tup, x::Tuple{}, ::Type{F}) = default(tup, F)
-function _get{N, F <: Field}(tup, x::Tuple{Vararg{Pair, N}}, ::Type{F})
+_get{F <: Field}(Func, x::Tuple{}, ::Type{F}) = Func()
+function _get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
     a, b = first(x)
     a <: F && return b
-    _get(tup, Base.tail(x), F)
+    _get(Func, Base.tail(x), F)
 end
-@inline function get{N, F <: Field}(x::Tuple{Vararg{Pair, N}}, ::Type{F})
-    _get(x, x, F)
+@inline function get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
+    _get(Func, x, F)
+end
+
+function get{F <: Field}(x::ComposableLike, ::Type{F})
+    get(()-> default(x, F), x, F)
+end
+function get{F <: Field}(x::ComposableLike, ::Type{F}, default)
+    get(()-> default, x, F)
+end
+function get{F <: Field}(F, x::Composable, ::Type{F})
+    if haskey(x, F)
+        return x[F]
+    end
+    F()
 end
 
 function (==)(x::Composable, y::Composable)
