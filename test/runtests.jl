@@ -54,8 +54,6 @@ function default(x, ::Type{Ranges})
     s = get(x, SpatialOrder) # if SpatialOrder in x, gets that, if not gets default(x, SpatialOrder)
     (0:size(data, s[1]), 0:size(data, s[2]))
 end
-isa(Transform, UnionAll)
-Transform <: UnionAll
 # Just for an example, lets create almost the same type, with slightly different convert behaviour
 @composed type GrayImage
     <: Image # Inherit fields from Image
@@ -108,12 +106,8 @@ end
 end
 
 
-@field Mouse begin
-    Mouse = (0, 0)
-end
-@field Area begin
-    Area = (0, 0, 0, 0)
-end
+@field Mouse = (0, 0)
+@field Area = (0, 0, 0, 0)
 
 @reactivecomposed type Window
     Mouse
@@ -122,7 +116,7 @@ end
 @testset "Reactive Composed" begin
     x = Window()
     testval = (77, 77)
-    FieldTraits.on(Mouse, x) do mouse
+    FieldTraits.on(x, Mouse) do mouse
         testval = mouse
         return
     end

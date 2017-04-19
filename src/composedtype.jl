@@ -7,6 +7,10 @@ Defaults to throwing the docstring as a message
 immutable UsageError <: Exception
     message::String
     value
+    function UsageError(c::String, value)
+        message = stringmime("text/plain", Docs.doc(c))
+        UsageError(message, value)
+    end
 end
 function UsageError(c, value)
     message = stringmime("text/plain", Docs.doc(c))
