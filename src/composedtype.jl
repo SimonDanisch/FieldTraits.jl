@@ -195,7 +195,7 @@ end
 # Constructor from another Composable type
 function (::Type{T}){T <: Composable}(c::Composable)
     fields = map(Fields(T)) do Field
-        convert(T, field, c)
+        convert(T, Field, c)
     end
     T(fields...)
 end
@@ -355,7 +355,6 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
         $(idxfuncs)
         $(fieldtype_expr)
     end
-    println(expr)
     esc(expr)
 end
 
@@ -414,6 +413,20 @@ function haskey{N, F <: Field}(x::Tuple{Vararg{Pair, N}}, ::Type{F})
     haskey(Base.tail(x), F)
 end
 
+##################################################################
+# get
+#
+
+# implements fallback to default
+function get{F <: Field}(x::ComposableLike, ::Type{F})
+    get(()-> default(x, F), x, F)
+end
+# implements to return a default value
+function get{F <: Field}(x::ComposableLike, ::Type{F}, default)
+    get(()-> default, x, F)
+end
+
+
 get{F <: Field}(Func, x::Tuple{}, ::Type{F}) = Func()
 function get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
     a, b = first(x)
@@ -421,28 +434,9 @@ function get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
     get(Func, Base.tail(x), F)
 end
 
-
-_get{F <: Field}(Func, x::Tuple{}, ::Type{F}) = Func()
-function _get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
-    a, b = first(x)
-    a <: F && return b
-    _get(Func, Base.tail(x), F)
-end
-@inline function get{N, F <: Field}(Func, x::Tuple{Vararg{Pair, N}}, ::Type{F})
-    _get(Func, x, F)
-end
-
-function get{F <: Field}(x::ComposableLike, ::Type{F})
-    get(()-> default(x, F), x, F)
-end
-function get{F <: Field}(x::ComposableLike, ::Type{F}, default)
-    get(()-> default, x, F)
-end
-function get{F <: Field}(F, x::Composable, ::Type{F})
-    if haskey(x, F)
-        return x[F]
-    end
-    F()
+function get{F <: Field}(Func, x::Composable, ::Type{F})
+    haskey(x, F) && return x[F]
+    Func()
 end
 
 function (==)(x::Composable, y::Composable)
