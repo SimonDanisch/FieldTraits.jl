@@ -4,10 +4,12 @@ module FieldTraits
 using Compat, MacroTools
 using Compat.TypeUtils
 
-import Base: @propagate_inbounds, @pure, tail, haskey, getindex, setindex!, get
-import Base: is_linenumber, convert, (==), get!
+using Base: @propagate_inbounds, @pure, tail, is_linenumber
+import Base: (==), haskey, getindex, setindex!, get, get!, convert
 
 @compat abstract type Composable end
+
+export @field, @composed, @reactivecomposed, @needs, Fields
 
 include("composedtype.jl")
 

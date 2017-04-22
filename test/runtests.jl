@@ -1,6 +1,7 @@
 using FieldTraits, Quaternions, Colors
 using Base.Test
-import FieldTraits: @field, @composed, @reactivecomposed, Fields, default
+
+include("core.jl")
 
 @field ImageData
 
@@ -49,7 +50,7 @@ function Base.convert(::Type{SpatialOrder}, parent, value)
     value == :xy ? (1, 2) : (2, 1)
 end
 
-function default(x, ::Type{Ranges})
+function FieldTraits.default(x, ::Type{Ranges})
     data = x[ImageData]
     s = get(x, SpatialOrder) # if SpatialOrder in x, gets that, if not gets default(x, SpatialOrder)
     (0:size(data, s[1]), 0:size(data, s[2]))

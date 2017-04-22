@@ -1,19 +1,22 @@
 const Field = Composable
 
 """
-Throws an error for the usage of some type/function.
-Defaults to throwing the docstring as a message
+    UsageError(binding, value)
+    UsageError(message::String, value)
+
+Exception type for incorrect usage of some type or function `binding`.
+Defaults to throwing the docstring as a message, but you can supply a
+custom `message`. Any arguments can be supplied as `value`.
 """
 immutable UsageError <: Exception
     message::String
     value
-    function UsageError(c::String, value)
-        message = stringmime("text/plain", Docs.doc(c))
-        UsageError(message, value)
+    function UsageError(message::String, value)
+        new(message, value)
     end
 end
-function UsageError(c, value)
-    message = stringmime("text/plain", Docs.doc(c))
+function UsageError(binding, value)
+    message = stringmime("text/plain", Docs.doc(binding))
     UsageError(message, value)
 end
 
@@ -26,6 +29,8 @@ function Base.showerror(io::IO, e::UsageError)
 end
 
 """
+    Fields(typ)
+
 Gets a tuple of all field types of a composable
 """
 function Fields end
@@ -45,8 +50,12 @@ function field2symbol(field)
 end
 
 """
-Can be used to assert that a composable has certain fields.
-Usage: `@needs composable: Field1, Field2, ...`
+    @needs composable: Field1, Field2, ...
+    @needs composable: Field1, name2 = Field2, ...
+
+Asserts that a `composable` has the listed fields. Optionally assign a
+variable binding to chosen fields; this variable has scope within the
+containing block (e.g., function definition).
 """
 macro needs(expr::Expr)
     comp_fields = @match expr begin
@@ -80,8 +89,12 @@ macro needs(expr::Expr)
 end
 
 """
-default([Parent], field) constructs a default for `field`.
-Can be overloaded for different parents and falls back to empty field constructor
+    default(FieldType)
+    default(parent, FieldType)
+
+Construct a default for `FieldType`.  Can be specialized for different
+`parent` objects.  If you do not specialize it for type `FieldType`, this
+calls `FieldType()`.
 """
 function default{Parent, F <: Field}(x::Parent, ::Type{F})
     default(F)
@@ -97,14 +110,21 @@ function convert{F <: Field}(::Type{F}, parent, val)
 end
 
 """
-Calculates the index into a struct type from a Composable type.
-E.g.
-```
-    @composed type Test
-        Scale
-        Position
-    end
-    fieldindex(Test, Position) == 2
+    fieldindex(ComposableType, FieldType)
+
+Calculates the index into a struct type from a Composable type. The
+return is a tuple of `Val{i}` instances, where `i` is the index of
+`FieldType` in `ComposableType`. If `FieldType` is not a field of
+`ComposableType`, then `i` is 0.
+
+# Example
+
+```jldocstring
+@composed type Composed
+    Scale
+    Position
+end
+fieldindex(Composed, Position) == (Val{2}(),)
 ```
 """
 fieldindex{T <: Composable, F <: Field}(::Type{T}, ::Type{F}) = (Val{0}(),)
@@ -121,16 +141,21 @@ function haskey{T <: Composable, F <: Field}(c::T, field::Type{F})
     haskey(c, fieldindex(T, F))
 end
 
+# Would like to extend Base.fieldtype, but that is an Builtin function which can't
+# be extended.
 """
-Returns the type of a field in a composed type.
-Would like to extend Base.fieldtype, but that is an Builtin function which can't
-be extended. Falls back to any and will get extended by the `@composed` macro
+    cfieldtype(ComposableType, FieldType)
+
+Return the type of `FieldType` in a composed type `ComposedType`. The default
+is `Any`. This is automatically specialized by `@composed`.
 """
 cfieldtype{T <: Composable}(::T, field) = cfieldtype(T, field)
 cfieldtype{T <: Composable}(ct::Type{T}, field) = Any
 
 """
-Converts a value to the field type of field in a composed type.
+    fieldconvert(ComposableType, FieldType, value)
+
+Converts `value` to the type needed for field `FieldType` in type `ComposableType`.
 """
 function fieldconvert{T <: Composable}(ct::T, field, value)
     convert(cfieldtype(T, field), value)
@@ -191,7 +216,11 @@ function (::Type{T}){T <: Composable, N}(c::Tuple{Vararg{Pair, N}})
 end
 
 """
-Converts `x` to the field `F` in `C`. Defaults to getfield!
+    convert(ComposableType, FieldType, x)
+
+Converts field `FieldType` in `x` to the type of field `FieldType` in
+`ComposableType`. `x` may be supplied as another composable (thus
+extracting `x[FieldType]`), or as a tuple of `FieldType=>value` pairs.
 """
 function convert{C <: Composable, F <: Field}(::Type{C}, ::Type{F}, x::ComposableLike)
     convert(cfieldtype(C, F), get(x, F))
@@ -204,6 +233,11 @@ function (::Type{T}){T <: Composable}(c::Composable)
     T(fields...)
 end
 
+"""
+    @field FieldType
+
+Creates a type `FieldType` as a component of a Composable type.
+"""
 macro field(expr)
     usage = """
         "Must be @field Sym [<: OptionalSuperType] = default_body.
@@ -231,8 +265,12 @@ macro field(expr)
     end
 end
 
+
+
 """
-Recursively adds fieldindex methods for composed types.
+    add_fieldindex!(Field, block, idx, name)
+
+Internal function for recursively adding fieldindex methods for composed types.
 E.g.:
 ```
 @composed Transform
@@ -243,8 +281,8 @@ end
 @composed Test
     Transform
 end
-Will result in Test having fieldindex methods also for Scale Rotation and position
 ```
+will result in Test having fieldindex methods also for Scale Rotation and Position
 """
 function add_fieldindex!(Field, block, idx, name)
     push!(block.args,
