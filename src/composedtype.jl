@@ -317,16 +317,15 @@ function add_fields!(composedfields, result, fields, T_args, ftype_funcs, idx = 
             elseif field.head == :(.) || isa(field, GlobalRef) # untyped field which will get a parameter
                 push!(T_args, field => field)
                 Field = eval(current_module(), field)
-            elseif field.head == :(<:) # inherit fields
-                if length(field.args) != 1
-                    error("inheritance expression must be of form `<: Composable`")
-                end
-                tsym = field.args[1]
-                T = eval(current_module(), tsym)
-                idx = add_fields!(Fields(T), result, fields, T_args, idx)
-                continue
             else
-                error("Must be field::T, or <: T. Found: $field")
+                match = @match field begin
+                    (<: Composable_) => begin
+                        T = eval(current_module(), Composable)
+                        idx = add_fields!(Fields(T), result, fields, T_args, idx)
+                        continue
+                    end
+                end
+                match == nothing && error("Must be `field`, `field::T`, or `<: T`. Found: $field")
             end
         elseif isa(field, DataType) || (isdefined(Base, :UnionAll) && isa(field, UnionAll))
             sym = Symbol(field2string(field))
@@ -344,6 +343,21 @@ function add_fields!(composedfields, result, fields, T_args, ftype_funcs, idx = 
     idx
 end
 
+"""
+Usage:
+```Julia
+@composed type Name [<: OptionalSuperType]
+    <: InheritFieldsFromThisType
+    FieldTrait1
+    FieldTrait2::OptionalStrictType
+end
+```
+"""
+macro composed(expr::Expr)
+    composed_type(expr)
+end
+
+
 function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
     name_supertyp_fields = @match expr begin
         type name_ <: supertyp_
@@ -354,15 +368,7 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
         end => (name, supertyp, fields)
     end
     if name_supertyp_fields == nothing
-        throw(UsageError("""
-        Usage:
-        ```Julia
-        @composed type Name [<: OptionalSuperType]
-            FieldTrait1
-            FieldTrait2::OptionalStrictType
-        end
-        ```
-        """, expr))
+        throw(UsageError(composed, expr))
     end
     name, supertyp, fields = name_supertyp_fields
     composedfields = [additionalfields; fields...]
@@ -400,18 +406,6 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
     esc(expr)
 end
 
-"""
-Usage:
-```Julia
-@composed type Name [<: OptionalSuperType]
-    FieldTrait1
-    FieldTrait2::OptionalStrictType
-end
-```
-"""
-macro composed(expr::Expr)
-    composed_type(expr)
-end
 
 # A dictionary wrapper supporting the ComposedApi
 immutable ComposedDict{V} <: Composable
