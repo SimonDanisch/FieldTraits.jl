@@ -1,4 +1,6 @@
 const Field = Composable
+const ComposableLike = Union{Composable, Tuple{Vararg{Pair}}}
+
 
 """
     UsageError(binding, value)
@@ -59,6 +61,7 @@ containing block (e.g., function definition).
 """
 macro needs(expr::Expr)
     comp_fields = @match expr begin
+        (composable_:f1_)  => (composable, Any[f1])
         (composable_:f1_, ftail__)  => (composable, Any[f1, ftail...,])
         (composable_:var1_ = field1_)  => (composable, Any[:($var1 = $field1),])
         (composable_:var1_ = field1_, ftail__)  => (composable, Any[:($var1 = $field1), ftail...,])
@@ -88,25 +91,50 @@ macro needs(expr::Expr)
     esc(checks)
 end
 
+
+immutable Parent{P, T}
+    val::T
+end
+Parent{P, T}(::Type{P}, x::T) = Parent{P, T}(x)
+
 """
     default(FieldType)
     default(parent, FieldType)
 
 Construct a default for `FieldType`.  Can be specialized for different
 `parent` objects.  If you do not specialize it for type `FieldType`, this
-calls `FieldType()`.
+calls `FieldType()`. Values optionally holds a partially initialised Parent object, e.g.
+when called like Parent(A => x, B => c), A and B will be supplied via values.
+This way we can construct better defaults!
 """
-function default{Parent, F <: Field}(x::Parent, ::Type{F})
-    default(F)
-end
-function default{F <: Field}(::Type{F})
-    F()
+function default{P <: ComposableLike, F <: Field}(
+        ::Type{F}, ::Type{P},
+    )
+    default(F, Parent(P, ()))
 end
 
-# default for overloading conversion!
-# Parent can be a composable or any other guiding object for convert
-function convert{F <: Field}(::Type{F}, parent, val)
-    val
+function default{F <: Field, P <: ComposableLike, X}(
+        ::Type{F}, ::Parent{P, X},
+    )
+    default(F)
+end
+
+default{F <: Field}(::Type{F}) = F()
+
+"""
+    convert(ComposableType, FieldType, x)
+
+Converts field `FieldType` in `x` to the type of field `FieldType` in
+`ComposableType`. `x` may be supplied as another composable (thus
+extracting `x[FieldType]`), or as a tuple of `FieldType => value` pairs.
+"""
+function convertfor{C <: Composable, F <: Field}(::Type{C}, ::Type{F}, x::ComposableLike)
+    convertfor(C, F, x, get(x, F))
+end
+function convertfor{C <: Composable, F <: Field}(
+        ::Type{C}, ::Type{F}, x::ComposableLike, value
+    )
+    convert(cfieldtype(C, F), value)
 end
 
 """
@@ -191,44 +219,42 @@ end
     getindex(ct, fieldindex(ct, F))
 end
 
-# Default Constructor, empty constructor
+
+
+"""
+Default empty constructor.
+Will initialize fields with `default(T, field)`
+"""
 function (::Type{T}){T <: Composable}()
     fields = Fields(T)
     if isempty(fields) # we're at a leaf field without an empty constructor defined
         # TODO think of good error handling, that correctly advises the user
         error("No default for $T")
     end
-    T(map(field-> default(T, field), fields)...)
+    T(map(field-> default(field, T), fields)...)
 end
-const ComposableLike = Union{Composable, Tuple{Vararg{Pair}}}
 
 # Constructor from partial composed type (tuple of pairs)
 (::Type{T}){T <: Composable, N}(c::Vararg{Pair, N}) = T(c)
+"""
+Partially initialization constructor.
+You can supply values for fields as pairs, and the rest will be filled in by
+`default(T, field, pairs)`.
+"""
 function (::Type{T}){T <: Composable, N}(c::Tuple{Vararg{Pair, N}})
     c_converted = map(c) do fieldval
-        field, val = fieldval
-        field => convert(field, T, val) # converts might be expensive or a noop, so lets do it first
+        Field, val = fieldval
+        Field => convertfor(T, Field, c, val) # converts might be expensive or a noop, so lets do it first
     end
-    fields = map(Fields(T)) do field
-        convert(T, field, c_converted)
+    fields = map(Fields(T)) do Field
+        convertfor(T, Field, c_converted)
     end
     T(fields...)
-end
-
-"""
-    convert(ComposableType, FieldType, x)
-
-Converts field `FieldType` in `x` to the type of field `FieldType` in
-`ComposableType`. `x` may be supplied as another composable (thus
-extracting `x[FieldType]`), or as a tuple of `FieldType=>value` pairs.
-"""
-function convert{C <: Composable, F <: Field}(::Type{C}, ::Type{F}, x::ComposableLike)
-    convert(cfieldtype(C, F), get(x, F))
 end
 # Constructor from another Composable type
 function (::Type{T}){T <: Composable}(c::Composable)
     fields = map(Fields(T)) do Field
-        convert(T, Field, c)
+        convertfor(T, Field, c)
     end
     T(fields...)
 end
@@ -259,7 +285,7 @@ macro field(expr)
         :()
     end
     quote
-        immutable $name <: $supertyp end
+        Base.@__doc__ immutable $name <: $supertyp end
         FieldTraits.Fields(::Type{$name}) = ()
         $default_expr
     end
@@ -396,7 +422,7 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
         FieldTraits.Fields(::$name) = ($(fields...),)
     end
     expr = quote
-        type $(name){$(T_args...)} <: $supertyp
+        Base.@__doc__ type $(name){$(T_args...)} <: $supertyp
             $(typedfields...)
         end
         $(fieldfuncs)
@@ -454,8 +480,13 @@ end
 #
 
 # implements fallback to default
-function get{F <: Field}(x::ComposableLike, ::Type{F})
-    get(()-> default(x, F), x, F)
+# implements fallback to default
+function get{F <: Field}(p::Parent, ::Type{F})
+    get(()-> default(F, p), p.val, F)
+end
+
+function get{T <: ComposableLike, F <: Field}(x::T, ::Type{F})
+    get(()-> default(F, Parent(T, x)), x, F)
 end
 # implements to return a default value
 function get{F <: Field}(x::ComposableLike, ::Type{F}, default)
