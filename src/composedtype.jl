@@ -91,11 +91,14 @@ macro needs(expr::Expr)
     esc(checks)
 end
 
-
-immutable Parent{P, T}
+"""
+An partially initialized composed type for type Parent
+"""
+immutable Partial{Parent, T}
     val::T
 end
-Parent{P, T}(::Type{P}, x::T) = Parent{P, T}(x)
+Partial{P, T}(::Type{P}, x::T) = Partial{P, T}(x)
+Partial{P}(::Type{P}) = Partial(P, ComposedDict())
 
 """
     default(FieldType)
@@ -103,22 +106,17 @@ Parent{P, T}(::Type{P}, x::T) = Parent{P, T}(x)
 
 Construct a default for `FieldType`.  Can be specialized for different
 `parent` objects.  If you do not specialize it for type `FieldType`, this
-calls `FieldType()`. Values optionally holds a partially initialised Parent object, e.g.
-when called like Parent(A => x, B => c), A and B will be supplied via values.
+calls `FieldType()`. Values optionally holds a partially initialised Partial object, e.g.
+when called like Partial(A => x, B => c), A and B will be supplied via values.
 This way we can construct better defaults!
 """
 function default{P <: ComposableLike, F <: Field}(
         ::Type{F}, ::Type{P},
     )
-    default(F, Parent(P, ()))
+    default(F, Partial(P))
 end
 
-function default{F <: Field, P <: ComposableLike, X}(
-        ::Type{F}, ::Parent{P, X},
-    )
-    default(F)
-end
-
+default{F <: Field}(::Type{F}, ::Partial) = default(F)
 default{F <: Field}(::Type{F}) = F()
 
 """
@@ -128,14 +126,10 @@ Converts field `FieldType` in `x` to the type of field `FieldType` in
 `ComposableType`. `x` may be supplied as another composable (thus
 extracting `x[FieldType]`), or as a tuple of `FieldType => value` pairs.
 """
-function convertfor{C <: Composable, F <: Field}(::Type{C}, ::Type{F}, x::ComposableLike)
-    convertfor(C, F, x, get(x, F))
+function convertfor{F <: Field, P}(::Type{F}, x::Partial{P}, value)
+    convert(cfieldtype(P, F), value)
 end
-function convertfor{C <: Composable, F <: Field}(
-        ::Type{C}, ::Type{F}, x::ComposableLike, value
-    )
-    convert(cfieldtype(C, F), value)
-end
+
 
 """
     fieldindex(ComposableType, FieldType)
@@ -159,15 +153,12 @@ fieldindex{T <: Composable, F <: Field}(::Type{T}, ::Type{F}) = (Val{0}(),)
 fieldindex{T <: Composable, F <: Field}(::T, ::Type{F}) = fieldindex(T, F)
 
 
-function haskey{T <: Composable}(c::T, field::Tuple)
+Base.@inline function haskey{T <: Composable}(c::T, field::Tuple)
     haskey(c, field) > 0 && haskey(c, tail(field))
 end
-haskey{T <: Composable, N}(c::T, field::Val{N}) = N > 0
-haskey{T <: Composable, N}(c::T, field::Tuple{Val{N}}) = N > 0
-
-function haskey{T <: Composable, F <: Field}(c::T, field::Type{F})
-    haskey(c, fieldindex(T, F))
-end
+Base.@inline haskey{T <: Composable, N}(c::T, field::Val{N}) = N > 0
+Base.@inline haskey{T <: Composable, N}(c::T, field::Tuple{Val{N}}) = N > 0
+Base.@pure haskey{T <: Composable, F <: Field}(c::T, field::Type{F}) = haskey(c, fieldindex(T, F))
 
 # Would like to extend Base.fieldtype, but that is an Builtin function which can't
 # be extended.
@@ -201,7 +192,12 @@ end
     _setindex!(prim, val, last(field))
 end
 @propagate_inbounds function _setindex!{F <: Field}(ct::Composable, val, ::Type{F})
-    _setindex!(ct, val, fieldindex(ct, F))
+    idx = fieldindex(ct, F)
+    if idx != (Val{0}(),)
+        _setindex!(ct, val, idx)
+    else
+        throw(BoundsError(ct, F))
+    end
 end
 @propagate_inbounds function setindex!{F <: Field}(ct::Composable, value, field::Type{F})
     _setindex!(ct, value, field)
@@ -216,10 +212,22 @@ end
     getindex(getindex(ct, first(field)), tail(field))
 end
 @propagate_inbounds function getindex{F <: Field}(ct::Composable, ::Type{F})
-    getindex(ct, fieldindex(ct, F))
+    idx = fieldindex(ct, F)
+    if idx != (Val{0}(),)
+        return getindex(ct, idx)
+    else
+        throw(error(string("Couldn't access with field ", F, " Fields available: ($(join(Fields(ct), ", ")))")))
+    end
 end
 
-
+Base.length(x::Composable) = length(Fields(x))
+Base.start(x::Composable) = (Fields(x), 1)
+function Base.next(x::Composable, state)
+    fields, idx = state
+    field = fields[idx]
+    (field => x[field], (fields, idx + 1))
+end
+Base.done(x::Composable, state) = state[2] > length(state[1])
 
 """
 Default empty constructor.
@@ -231,7 +239,8 @@ function (::Type{T}){T <: Composable}()
         # TODO think of good error handling, that correctly advises the user
         error("No default for $T")
     end
-    T(map(field-> default(field, T), fields)...)
+    p = Partial(T)
+    T(map(field-> default(field, p), fields)...)
 end
 
 # Constructor from partial composed type (tuple of pairs)
@@ -241,23 +250,39 @@ Partially initialization constructor.
 You can supply values for fields as pairs, and the rest will be filled in by
 `default(T, field, pairs)`.
 """
-function (::Type{T}){T <: Composable, N}(c::Tuple{Vararg{Pair, N}})
-    c_converted = map(c) do fieldval
+function (::Type{T}){T <: Composable}(c::ComposableLike)
+    println(c)
+    partial1 = Partial(T, c)
+    conv_fields = ComposedDict(Dict{DataType, Any}(map(c) do fieldval
         Field, val = fieldval
-        Field => convertfor(T, Field, c, val) # converts might be expensive or a noop, so lets do it first
-    end
+        Field => convertfor(Field, partial1, val) # converts might be expensive or a noop, so lets do it first
+    end))
+    partialconv = Partial(T, conv_fields)
     fields = map(Fields(T)) do Field
-        convertfor(T, Field, c_converted)
+        x = if haskey(conv_fields, Field)
+            get(conv_fields, Field)
+        else
+            default(Field, partialconv)
+        end
+        if !haskey(partialconv, Field)
+            partialconv[Field] = x
+        end
+        x
     end
     T(fields...)
 end
 # Constructor from another Composable type
-function (::Type{T}){T <: Composable}(c::Composable)
-    fields = map(Fields(T)) do Field
-        convertfor(T, Field, c)
-    end
-    T(fields...)
-end
+# function (::Type{T}){T <: Composable}(c::Composable)
+#     p = Partial(T, c)
+#     fields = map(Fields(T)) do field
+#         val = get(p, field)
+#         if haskey(p, field)
+#             p[field] = val
+#         end
+#         convertfor(field, p, val)
+#     end
+#     T(fields...)
+# end
 
 """
     @field FieldType
@@ -385,13 +410,20 @@ end
 
 
 function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
-    name_supertyp_fields = @match expr begin
+    name_supertyp_fields, mutable = @match expr begin
         type name_ <: supertyp_
             fields__
-        end => (name, supertyp, fields)
+        end => (name, supertyp, fields), true
         type name_
             fields__
-        end => (name, supertyp, fields)
+        end => (name, supertyp, fields), true
+
+        immutable name_ <: supertyp_
+            fields__
+        end => (name, supertyp, fields), false
+        immutable name_
+            fields__
+        end => (name, supertyp, fields), false
     end
     if name_supertyp_fields == nothing
         throw(UsageError(composed, expr))
@@ -421,10 +453,13 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
         FieldTraits.Fields(::$name) = ($(fields...),)
     end
+    typ = Expr(
+        :type, mutable,
+        :($(name){$(T_args...)} <: $supertyp),
+        Expr(:block, typedfields...)
+    )
     expr = quote
-        Base.@__doc__ type $(name){$(T_args...)} <: $supertyp
-            $(typedfields...)
-        end
+        Base.@__doc__ $typ
         $(fieldfuncs)
         $(idxfuncs)
         $(fieldtype_expr)
@@ -437,8 +472,12 @@ end
 immutable ComposedDict{V} <: Composable
     data::Dict{DataType, V}
 end
+ComposedDict() = ComposedDict(Dict{DataType, Any})
 
-haskey{F <: Field}(cd::ComposedDict, ::Type{F}) = haskey(cd.data, F)
+Base.start(x::ComposedDict) = start(x.data)
+Base.next(x::ComposedDict, state) = next(x.data, state)
+Base.done(x::ComposedDict, state) = done(x.data, state)
+Base.length(x::ComposedDict) = length(x.data)
 
 function getindex{F <: Field}(cd::ComposedDict, ::Type{F})
     # TODO search!
@@ -449,9 +488,14 @@ function setindex!{F <: Field}(cd::ComposedDict, val, ::Type{F})
     # TODO search!
     setindex!(cd.data,val, F)
 end
+function setindex!{F <: Field}(cd::Partial, val, ::Type{F})
+    # TODO search!
+    setindex!(cd.val, val, F)
+end
 function get!{F <: Field}(cd::ComposedDict, ::Type{F}, default)
     get!(cd.data, F, default)
 end
+
 
 Fields(::Type{ComposedDict}) = ()
 Fields(::ComposedDict) = ()
@@ -468,7 +512,13 @@ end
     getindex(Base.tail(x), F)
 end
 
+haskey{F <: Field}(cd::ComposedDict, ::Type{F}) = haskey(cd.data, F)
+
+function haskey{F <: Field}(x::Partial, ::Type{F})
+    haskey(x.val, F)
+end
 haskey{F <: Field}(x::Tuple{}, ::Type{F}) = false
+
 function haskey{N, F <: Field}(x::Tuple{Vararg{Pair, N}}, ::Type{F})
     a, b = first(x)
     a <: F && return true
@@ -481,12 +531,17 @@ end
 
 # implements fallback to default
 # implements fallback to default
-function get{F <: Field}(p::Parent, ::Type{F})
+function get{F <: Field}(p::Partial, ::Type{F})
     get(()-> default(F, p), p.val, F)
+end
+function get!{F <: Field}(cd::Partial, ::Type{F}, default...)
+    x = get(cd, F, default...)
+    cd.val[F] = x
+    x
 end
 
 function get{T <: ComposableLike, F <: Field}(x::T, ::Type{F})
-    get(()-> default(F, Parent(T, x)), x, F)
+    get(()-> default(F, Partial(T, x)), x, F)
 end
 # implements to return a default value
 function get{F <: Field}(x::ComposableLike, ::Type{F}, default)

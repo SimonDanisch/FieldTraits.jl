@@ -33,9 +33,9 @@ After this operation, setindex!(a, val) will result in
 setindex!(b, val) being executed.
 link!(Scale, a => b)
 """
-function link!{F <: Field}(::Type{F}, pair::Pair{ReactiveComposable, Composable})
+function link!{F <: Field}(::Type{F}, pair::Pair{<: ReactiveComposable, <: Any})
     a, b = pair
-    on(F, a) do val
+    on(a, F) do val
         b[F] = val
     end
 end
@@ -62,4 +62,9 @@ function on(F, object::ReactiveComposable, head, tail...)
         # adds a callback to the field
         push!(fieldlinks, (F, fields, args))
     end
+end
+
+function convertfor(::Type{Links}, x::Partial, val)
+    # never copy links
+    default(Links, x)
 end
