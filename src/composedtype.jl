@@ -35,7 +35,8 @@ end
 
 Gets a tuple of all field types of a composable
 """
-function Fields end
+Fields(x::Type{<:Composable}) = ()
+Fields(x::Composable) = Fields(typeof(x))
 
 function field2string(field)
     tname = typename(field)
@@ -149,16 +150,13 @@ end
 fieldindex(Composed, Position) == (Val{2}(),)
 ```
 """
-fieldindex{T <: Composable, F <: Field}(::Type{T}, ::Type{F}) = (Val{0}(),)
+fieldindex{T <: Composable, F <: Field}(::Type{T}, ::Type{F}) = Val{0}()
 fieldindex{T <: Composable, F <: Field}(::T, ::Type{F}) = fieldindex(T, F)
 
 
-Base.@inline function haskey{T <: Composable}(c::T, field::Tuple)
-    haskey(c, field) > 0 && haskey(c, tail(field))
-end
-Base.@inline haskey{T <: Composable, N}(c::T, field::Val{N}) = N > 0
-Base.@inline haskey{T <: Composable, N}(c::T, field::Tuple{Val{N}}) = N > 0
-Base.@pure haskey{T <: Composable, F <: Field}(c::T, field::Type{F}) = haskey(c, fieldindex(T, F))
+Base.@inline haskey{T <: Composable, N}(::Type{T}, field::Val{N}) = N > 0
+Base.@pure haskey{T <: Composable, F <: Field}(c::Type{T}, field::Type{F}) = haskey(T, fieldindex(T, F))
+Base.@pure haskey{T <: Composable, F <: Field}(c::T, field::Type{F}) = haskey(T, fieldindex(T, F))
 
 # Would like to extend Base.fieldtype, but that is an Builtin function which can't
 # be extended.
@@ -168,9 +166,15 @@ Base.@pure haskey{T <: Composable, F <: Field}(c::T, field::Type{F}) = haskey(c,
 Return the type of `FieldType` in a composed type `ComposedType`. The default
 is `Any`. This is automatically specialized by `@composed`.
 """
-cfieldtype{T <: Composable}(::T, field) = cfieldtype(T, field)
-cfieldtype{T <: Composable}(ct::Type{T}, field) = Any
-
+cfieldtype{T <: Composable, F <: Field}(ct::T, ::Type{F}) = cfieldtype(T, fieldindex(T, F), F)
+cfieldtype{T <: Composable, F <: Field}(ct::Type{T}, ::Type{F}) = cfieldtype(T, fieldindex(T, F), F)
+function cfieldtype{T <: Composable, N}(::Type{T}, ::Val{N}, field = N)
+    if N === 0
+        error("Can't get $field from type $T")
+    else
+        fieldtype(T, N)
+    end
+end
 """
     fieldconvert(ComposableType, FieldType, value)
 
@@ -184,39 +188,28 @@ end
 @propagate_inbounds function _setindex!{N}(ct::Composable, val, field::Val{N})
     setfield!(ct, N, fieldconvert(ct, field, val))
 end
-@propagate_inbounds function _setindex!{N}(ct::Composable, val, field::Tuple{Val{N}})
-    setfield!(ct, N, fieldconvert(ct, field, val))
-end
-@propagate_inbounds function _setindex!(ct::Composable, val, field::Tuple)
-    prim = ct[Base.front(field)]
-    _setindex!(prim, val, last(field))
-end
+
 @propagate_inbounds function _setindex!{F <: Field}(ct::Composable, val, ::Type{F})
     idx = fieldindex(ct, F)
-    if idx != (Val{0}(),)
+    if !isa(idx, Val{0})
         _setindex!(ct, val, idx)
     else
         throw(BoundsError(ct, F))
     end
 end
+
 @propagate_inbounds function setindex!{F <: Field}(ct::Composable, value, field::Type{F})
     _setindex!(ct, value, field)
 end
 @propagate_inbounds function getindex{N}(ct::Composable, field::Val{N})
     getfield(ct, N)
 end
-@propagate_inbounds function getindex{N}(ct::Composable, field::Tuple{Val{N}})
-    getfield(ct, N)
-end
-@propagate_inbounds function getindex(ct::Composable, field::Tuple)
-    getindex(getindex(ct, first(field)), tail(field))
-end
 @propagate_inbounds function getindex{F <: Field}(ct::Composable, ::Type{F})
     idx = fieldindex(ct, F)
-    if idx != (Val{0}(),)
+    if !isa(idx, Val{0})
         return getindex(ct, idx)
     else
-        throw(error(string("Couldn't access with field ", F, " Fields available: ($(join(Fields(ct), ", ")))")))
+        throw(BoundsError(ct, F))
     end
 end
 
@@ -233,29 +226,31 @@ Base.done(x::Composable, state) = state[2] > length(state[1])
 Default empty constructor.
 Will initialize fields with `default(T, field)`
 """
-function (::Type{T}){T <: Composable}()
+function (t::Type{T}){T <: Composable}()
     fields = Fields(T)
     if isempty(fields) # we're at a leaf field without an empty constructor defined
         # TODO think of good error handling, that correctly advises the user
-        error("No default for $T")
+        error("No default for $t")
     end
     p = Partial(T)
     T(map(field-> default(field, p), fields)...)
 end
 
 # Constructor from partial composed type (tuple of pairs)
-(::Type{T}){T <: Composable, N}(c::Vararg{Pair, N}) = T(c)
 """
 Partially initialization constructor.
 You can supply values for fields as pairs, and the rest will be filled in by
 `default(T, field, pairs)`.
 """
 function (::Type{T}){T <: Composable}(c::ComposableLike)
-    println(c)
     partial1 = Partial(T, c)
     conv_fields = ComposedDict(Dict{DataType, Any}(map(c) do fieldval
         Field, val = fieldval
-        Field => convertfor(Field, partial1, val) # converts might be expensive or a noop, so lets do it first
+        if haskey(T, Field)
+            Field => convertfor(Field, partial1, val) # converts might be expensive or a noop, so lets do it first
+        else
+            fieldval
+        end
     end))
     partialconv = Partial(T, conv_fields)
     fields = map(Fields(T)) do Field
@@ -271,18 +266,6 @@ function (::Type{T}){T <: Composable}(c::ComposableLike)
     end
     T(fields...)
 end
-# Constructor from another Composable type
-# function (::Type{T}){T <: Composable}(c::Composable)
-#     p = Partial(T, c)
-#     fields = map(Fields(T)) do field
-#         val = get(p, field)
-#         if haskey(p, field)
-#             p[field] = val
-#         end
-#         convertfor(field, p, val)
-#     end
-#     T(fields...)
-# end
 
 """
     @field FieldType
@@ -311,41 +294,13 @@ macro field(expr)
     end
     quote
         Base.@__doc__ immutable $name <: $supertyp end
-        FieldTraits.Fields(::Type{$name}) = ()
         $default_expr
     end
 end
 
 
 
-"""
-    add_fieldindex!(Field, block, idx, name)
 
-Internal function for recursively adding fieldindex methods for composed types.
-E.g.:
-```
-@composed Transform
-    Scale
-    Rotation
-    Position
-end
-@composed Test
-    Transform
-end
-```
-will result in Test having fieldindex methods also for Scale Rotation and Position
-"""
-function add_fieldindex!(Field, block, idx, name)
-    push!(block.args,
-        :(FieldTraits.fieldindex{T <: $name}(::Type{T}, ::Type{$Field}) = $idx)
-    )
-    if Field <: Composable
-        for (i, T) in enumerate(Fields(Field))
-            newidx = Expr(:tuple, idx.args..., :(Val{$i}()))
-            add_fieldindex!(T, block, newidx, name)
-        end
-    end
-end
 
 function add_fields!(composedfields, result, fields, T_args, ftype_funcs, idx = 1)
     for field in composedfields
@@ -388,7 +343,6 @@ function add_fields!(composedfields, result, fields, T_args, ftype_funcs, idx = 
         fname = field2symbol(Field)
         push!(fields, Field)
         push!(result, :($fname::$T))
-
         idx += 1
     end
     idx
@@ -433,25 +387,14 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
     typedfields = []; fields = []; FT_args = []; ftype_funcs = []
     add_fields!(composedfields, typedfields, fields, FT_args, ftype_funcs)
     idxfuncs = Expr(:block)
-
     for (i, Field) in enumerate(fields)
-        add_fieldindex!(Field, idxfuncs, :((Val{$i}(),)), name)
+        push!(idxfuncs.args,
+            :(FieldTraits.fieldindex(::Type{<: $name}, ::Type{$Field}) = Val{$i}())
+        )
     end
     T_args = last.(FT_args)
-    fieldtype_expr = Expr(:block)
-    for (field, T) in FT_args
-        push!(fieldtype_expr.args,
-            :(FieldTraits.cfieldtype{$(T_args...)}(::Type{$name{$(T_args...)}}, ::Type{$field}) = $T)
-        )
-    end
-    for (field, T) in ftype_funcs
-        push!(fieldtype_expr.args,
-            :(FieldTraits.cfieldtype{C <: $name}(::Type{C}, ::Type{$field}) = $T)
-        )
-    end
     fieldfuncs = quote
         FieldTraits.Fields(::Type{$name}) = ($(fields...),)
-        FieldTraits.Fields(::$name) = ($(fields...),)
     end
     typ = Expr(
         :type, mutable,
@@ -462,7 +405,6 @@ function composed_type(expr::Expr, additionalfields = [], supertyp = Composable)
         Base.@__doc__ $typ
         $(fieldfuncs)
         $(idxfuncs)
-        $(fieldtype_expr)
     end
     esc(expr)
 end
@@ -472,7 +414,7 @@ end
 immutable ComposedDict{V} <: Composable
     data::Dict{DataType, V}
 end
-ComposedDict() = ComposedDict(Dict{DataType, Any})
+ComposedDict() = ComposedDict(Dict{DataType, Any}())
 
 Base.start(x::ComposedDict) = start(x.data)
 Base.next(x::ComposedDict, state) = next(x.data, state)
@@ -496,10 +438,8 @@ function get!{F <: Field}(cd::ComposedDict, ::Type{F}, default)
     get!(cd.data, F, default)
 end
 
-
 Fields(::Type{ComposedDict}) = ()
 Fields(::ComposedDict) = ()
-(::Type{ComposedDict})() = ComposedDict(Dict{DataType, Any}())
 
 # helper to use tuples as partial Composed Traits
 function Base.getindex{F <: Field}(x::Tuple{}, ::Type{F})
